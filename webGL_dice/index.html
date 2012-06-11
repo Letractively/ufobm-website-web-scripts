@@ -1,0 +1,770 @@
+<!-- 
+/*
+ * Copyright 2012, Matteo "ufo" Bucchi.
+ * All rights reserved.
+ *
+ * Free for non-commercial use. For commercial purposes you must have 
+ * explicit (and written) accord. You are not allowed to delete 
+ * informations about the authors and you must attribute the work in 
+ * a explicit manner (for example, with a link). If you alter, 
+ * transform, or build upon this work, please post back. 
+ *
+ * Code based on that available on: http://www.learningwebgl.com.
+ *
+ * Author: Matteo "ufo" Bucchi
+ * Website: http://ufobm.altervista.org
+ * Contact: ufobm@hotmail.it
+ *
+ * Title: webGL dice
+ * Version: 0.2
+ * Description: a simple 3D dice with random rotation.
+ *
+ */
+-->
+
+<html>
+
+<head>
+<title>WebGL dice</title>
+<meta http-equiv="content-type" content="text/html; charset=ISO-8859-1">
+
+<script type="text/javascript" src="js/glMatrix-0.9.5.min.js"></script>
+<script type="text/javascript" src="js/webgl-utils.js"></script>
+<script type="text/javascript" src="js/base.js"></script>
+<script type="text/javascript" src="js/fullscreen.js"></script>
+<script type="text/javascript" src="js/windowsize.js"></script>
+
+<!-- Porzioni di codice in GLSL utilizzate dalla scheda video. -->
+<script id="shader-fs" type="x-shader/x-fragment">
+    precision mediump float;
+
+    varying vec2 vTextureCoord;
+
+    uniform sampler2D uSampler;
+
+    void main(void) {
+        gl_FragColor = texture2D(uSampler, vec2(vTextureCoord.s, vTextureCoord.t));
+    }
+</script>
+
+<!-- Porzioni di codice in GLSL utilizzate dalla scheda video. -->
+<script id="shader-vs" type="x-shader/x-vertex">
+    attribute vec3 aVertexPosition;
+    attribute vec2 aTextureCoord;
+
+    uniform mat4 uMVMatrix;
+    uniform mat4 uPMatrix;
+
+    varying vec2 vTextureCoord;
+
+
+    void main(void) {
+        gl_Position = uPMatrix * uMVMatrix * vec4(aVertexPosition, 1.0);
+        vTextureCoord = aTextureCoord;
+    }
+</script>
+
+
+<script type="text/javascript">
+
+    var gl;
+    var currentDiceValue = 1;
+
+    //Recupera il contesto per eseguire webGL
+    function initGL(canvas) {
+    	gl = WebGLUtils.setupWebGL(canvas);
+    	gl.viewportWidth = canvas.width;
+        gl.viewportHeight = canvas.height;
+    }
+
+	//Recupera gli script in GLSL dalla pagina
+    function getShader(gl, id) {
+        var shaderScript = document.getElementById(id);
+        if (!shaderScript) {
+            return null;
+        }
+
+        var str = "";
+        var k = shaderScript.firstChild;
+        while (k) {
+            if (k.nodeType == 3) {
+                str += k.textContent;
+            }
+            k = k.nextSibling;
+        }
+
+        var shader;
+        if (shaderScript.type == "x-shader/x-fragment") {
+            shader = gl.createShader(gl.FRAGMENT_SHADER);
+        } else if (shaderScript.type == "x-shader/x-vertex") {
+            shader = gl.createShader(gl.VERTEX_SHADER);
+        } else {
+            return null;
+        }
+
+        gl.shaderSource(shader, str);
+        gl.compileShader(shader);
+
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            alert(gl.getShaderInfoLog(shader));
+            return null;
+        }
+
+        return shader;
+    }
+
+
+    var shaderProgram;
+
+    //Inizializza i frammenti di codice GLSL 
+    function initShaders() {
+        var fragmentShader = getShader(gl, "shader-fs");
+        var vertexShader = getShader(gl, "shader-vs");
+
+        shaderProgram = gl.createProgram();
+        gl.attachShader(shaderProgram, vertexShader);
+        gl.attachShader(shaderProgram, fragmentShader);
+        gl.linkProgram(shaderProgram);
+
+        if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
+            alert("Could not initialise shaders");
+        }
+
+        gl.useProgram(shaderProgram);
+
+        shaderProgram.vertexPositionAttribute = gl.getAttribLocation(shaderProgram, "aVertexPosition");
+        gl.enableVertexAttribArray(shaderProgram.vertexPositionAttribute);
+
+        shaderProgram.textureCoordAttribute = gl.getAttribLocation(shaderProgram, "aTextureCoord");
+        gl.enableVertexAttribArray(shaderProgram.textureCoordAttribute);
+
+        shaderProgram.pMatrixUniform = gl.getUniformLocation(shaderProgram, "uPMatrix");
+        shaderProgram.mvMatrixUniform = gl.getUniformLocation(shaderProgram, "uMVMatrix");
+        shaderProgram.samplerUniform = gl.getUniformLocation(shaderProgram, "uSampler");
+    }
+
+	
+    var diceTexture = null;
+
+    //Inizializza la texture per il dado
+    function initTexture() {
+        diceTexture = gl.createTexture();
+        diceTexture.image = new Image();
+        
+        diceTexture.image.onload = function () {
+            handleLoadedTexture(diceTexture)
+        }
+
+        diceTexture.image.src = "sprite.png";
+        
+        //Gestisce la texture una volta che l'immagine è stata caricata dal server
+        function handleLoadedTexture(texture) {
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, texture.image);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+
+            gl.bindTexture(gl.TEXTURE_2D, null);
+        }
+    }
+
+	//mvMatrix è la Model-View matrix e pMatrix la projection matrix
+    var mvMatrix = mat4.create();
+    var mvMatrixStack = [];
+    var pMatrix = mat4.create();
+
+    //Funzioni per memorizzare ed estrarre la mvMatrix secondo uno stack
+    function mvPushMatrix() {
+        var copy = mat4.create();
+        mat4.set(mvMatrix, copy);
+        mvMatrixStack.push(copy);
+    }
+
+    function mvPopMatrix() {
+        if (mvMatrixStack.length == 0) {
+            throw "Invalid popMatrix!";
+        }
+        mvMatrix = mvMatrixStack.pop();
+    }
+
+	//Invia la mvMatrix e la pMatrix allo shader in GLSL
+    function setMatrixUniforms() {
+        gl.uniformMatrix4fv(shaderProgram.pMatrixUniform, false, pMatrix);
+        gl.uniformMatrix4fv(shaderProgram.mvMatrixUniform, false, mvMatrix);
+    }
+
+
+	//Converte gradi in radianti
+    function degToRad(degrees) {
+        return degrees * Math.PI / 180;
+    }
+
+
+    var xRot = 15; //Default 15
+    var xSpeed = 0;
+
+    var yRot = 0;
+    var ySpeed = 0;
+    
+    var zRot = 0;
+    var zSpeed = 0;
+
+    var z = -5.0;
+
+    //Inizializza i buffer che contengono le coordinate del cubo, della texture
+    //e il modo di usare le coordinate per creare i triangoli per le facce del cubo
+    var cubeVertexPositionBuffer;
+    var cubeVertexTextureCoordBuffer;
+    var cubeVertexIndexBuffer;
+    function initBuffers() {
+        cubeVertexPositionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, cubeVertexPositionBuffer);
+        vertices = [
+            // Front face
+            -1.0, -1.0,  1.0,
+             1.0, -1.0,  1.0,
+             1.0,  1.0,  1.0,
+            -1.0,  1.0,  1.0,
+
+            // Back face
+            -1.0, -1.0, -1.0,
+            -1.0,  1.0, -1.0,
+             1.0,  1.0, -1.0,
+             1.0, -1.0, -1.0,
+
+            // Top face
+            -1.0,  1.0, -1.0,
+            -1.0,  1.0,  1.0,
+             1.0,  1.0,  1.0,
+             1.0,  1.0, -1.0,
+
+            // Bottom face
+            -1.0, -1.0, -1.0,
+             1.0, -1.0, -1.0,
+             1.0, -1.0,  1.0,
+            -1.0, -1.0,  1.0,
+
+            // Right face
+             1.0, -1.0, -1.0,
+             1.0,  1.0, -1.0,
+             1.0,  1.0,  1.0,
+             1.0, -1.0,  1.0,
+
+            // Left face
+            -1.0, -1.0, -1.0,
+            -1.0, -1.0,  1.0,
+            -1.0,  1.0,  1.0,
+            -1.0,  1.0, -1.0,
+        ];
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+        cubeVertexPositionBuffer.itemSize = 3;
+        cubeVertexPositionBuffer.numItems = 24;
+
+        cubeVertexTextureCoordBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, cubeVertexTextureCoordBuffer);
+        var textureCoords = [
+            // Front face, from bottom-left counterclockwise
+            0.0,   0.5,
+            0.333, 0.5,
+            0.333, 1.0,
+            0.0,   1.0,
+
+            // Back face, from bottom-right counterclockwise
+            1.0,   0.0,
+            1.0,   0.5,
+            0.666, 0.5,
+            0.666, 0.0,
+
+            // Top face, from top-left counterclockwise
+            0.333, 1.0,
+            0.333, 0.5,
+            0.666, 0.5,
+            0.666, 1.0,
+
+            // Bottom face, from top-right counterclockwise
+            0.666, 0.5,
+            0.333, 0.5,
+            0.333, 0.0,
+            0.666, 0.0,
+
+            // Left face, from bottom-left counterclockwise
+            0.0,   0.0,
+            0.333, 0.0,
+            0.333, 0.5,
+            0.0,   0.5,
+           
+            // Right face, from bottom-right counterclockwise
+            1.0,   0.5,
+            1.0,   1.0,
+            0.666, 1.0,
+            0.666, 0.5,
+        ];
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(textureCoords), gl.STATIC_DRAW);
+        cubeVertexTextureCoordBuffer.itemSize = 2;
+        cubeVertexTextureCoordBuffer.numItems = 24;
+
+        cubeVertexIndexBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeVertexIndexBuffer);
+        var cubeVertexIndices = [
+            0, 1, 2,      0, 2, 3,    // Front face
+            4, 5, 6,      4, 6, 7,    // Back face
+            8, 9, 10,     8, 10, 11,  // Top face
+            12, 13, 14,   12, 14, 15, // Bottom face
+            16, 17, 18,   16, 18, 19, // Right face
+            20, 21, 22,   20, 22, 23  // Left face
+        ]
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(cubeVertexIndices), gl.STATIC_DRAW);
+        cubeVertexIndexBuffer.itemSize = 1;
+        cubeVertexIndexBuffer.numItems = 36;
+    }
+
+	//Disegna la scena
+    function drawScene() {
+        gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+        mat4.perspective(45, gl.viewportWidth / gl.viewportHeight, 0.1, 100.0, pMatrix);
+
+        mat4.identity(mvMatrix);
+
+        mat4.translate(mvMatrix, [0.0, 0.0, z]);
+
+        mat4.rotate(mvMatrix, degToRad(xRot), [1, 0, 0]);
+        mat4.rotate(mvMatrix, degToRad(yRot), [0, 1, 0]);
+        mat4.rotate(mvMatrix, degToRad(zRot), [0, 0, 1]);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, cubeVertexPositionBuffer);
+        gl.vertexAttribPointer(shaderProgram.vertexPositionAttribute, cubeVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, cubeVertexTextureCoordBuffer);
+        gl.vertexAttribPointer(shaderProgram.textureCoordAttribute, cubeVertexTextureCoordBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, diceTexture);
+        gl.uniform1i(shaderProgram.samplerUniform, 0);
+
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cubeVertexIndexBuffer);
+        setMatrixUniforms();
+        gl.drawElements(gl.TRIANGLES, cubeVertexIndexBuffer.numItems, gl.UNSIGNED_SHORT, 0);
+    }
+
+	//Valuta il valore del dado
+	function getCurrentDiceValue(xRot,yRot,zRot) {
+        switch(xRot) {
+	    	case 90+15:
+	    		switch(yRot) {
+		    		case 90:
+			    		switch(zRot) {
+				    		case 90:
+				    			currentDiceValue = 4; //MOD
+					    		break;
+					    	case 180:
+					    		currentDiceValue = 5; //MOD (OK)
+					    		break;
+					    	case 270:
+					    		currentDiceValue = 3; //MOD
+					    		break;
+					    	case 0: case 360:
+					    		currentDiceValue = 2; //MOD
+					    		break;
+			    		}
+			    		break;
+			    	case 180:
+			    		switch(zRot) {
+				    		case 90:
+				    			currentDiceValue = 4; //MOD
+					    		break;
+					    	case 180:
+					    		currentDiceValue = 5; //MOD
+					    		break;
+					    	case 270:
+					    		currentDiceValue = 3; //MOD
+					    		break;
+					    	case 0: case 360:
+					    		currentDiceValue = 2; //MOD
+					    		break;
+			    		}
+			    		break;
+			    	case 270:
+			    		switch(zRot) {
+				    		case 90:
+				    			currentDiceValue = 4; //MOD
+					    		break;
+					    	case 180:
+					    		currentDiceValue = 5; //MOD
+					    		break;
+					    	case 270:
+					    		currentDiceValue = 3; //MOD (OK)
+					    		break;
+					    	case 0: case 360:
+					    		currentDiceValue = 2; //MOD
+					    		break;
+			    		}
+			    		break;
+			    	case 0: case 360:
+			    		switch(zRot) {
+				    		case 90:
+				    			currentDiceValue = 4; //MOD
+					    		break;
+					    	case 180:
+					    		currentDiceValue = 5; //MOD
+					    		break;
+					    	case 270:
+					    		currentDiceValue = 3; //MOD
+					    		break;
+					    	case 0: case 360:
+					    		currentDiceValue = 2; //MOD
+					    		break;
+			    		}
+			    		break;
+	    		}
+	    		break;
+	    	case 180+15:
+	    		switch(yRot) {
+		    		case 90:
+			    		switch(zRot) {
+				    		case 90:
+				    			currentDiceValue = 2; //MOD
+					    		break;
+					    	case 180:
+					    		currentDiceValue = 4; //MOD
+					    		break;
+					    	case 270:
+					    		currentDiceValue = 5; //MOD
+					    		break;
+					    	case 0: case 360:
+					    		currentDiceValue = 3; //MOD
+					    		break;
+			    		}
+			    		break;
+			    	case 180:
+			    		switch(zRot) {
+				    		case 90:
+				    			currentDiceValue = 1; //MOD
+					    		break;
+					    	case 180:
+					    		currentDiceValue = 1; //MOD (OK)
+					    		break;
+					    	case 270:
+					    		currentDiceValue = 1; //MOD
+					    		break;
+					    	case 0: case 360:
+					    		currentDiceValue = 1; //MOD
+					    		break;
+			    		}
+			    		break;
+			    	case 270:
+			    		switch(zRot) {
+				    		case 90:
+				    			currentDiceValue = 2; //MOD
+					    		break;
+					    	case 180:
+					    		currentDiceValue = 4; //MOD (OK)
+					    		break;
+					    	case 270:
+					    		currentDiceValue = 5; //MOD
+					    		break;
+					    	case 0: case 360:
+					    		currentDiceValue = 3; //MOD
+					    		break;
+			    		}
+			    		break;
+			    	case 0: case 360:
+			    		switch(zRot) {
+				    		case 90:
+				    			currentDiceValue = 6; //MOD
+					    		break;
+					    	case 180:
+					    		currentDiceValue = 6; //MOD
+					    		break;
+					    	case 270:
+					    		currentDiceValue = 6; //MOD
+					    		break;
+					    	case 0: case 360:
+					    		currentDiceValue = 6; //MOD
+					    		break;
+			    		}
+			    		break;
+	    		}
+	    		break;
+	    	case 270+15:
+	    		switch(yRot) {
+		    		case 90:
+			    		switch(zRot) {
+				    		case 90:
+				    			currentDiceValue = 3; //MOD
+					    		break;
+					    	case 180:
+					    		currentDiceValue = 2; //MOD
+					    		break;
+					    	case 270:
+					    		currentDiceValue = 4; //MOD
+					    		break;
+					    	case 0: case 360:
+					    		currentDiceValue = 5; //MOD (OK)
+					    		break;
+			    		}
+			    		break;
+			    	case 180:
+			    		switch(zRot) {
+				    		case 90:
+				    			currentDiceValue = 3; //MOD
+					    		break;
+					    	case 180:
+					    		currentDiceValue = 2; //MOD
+					    		break;
+					    	case 270:
+					    		currentDiceValue = 4; //MOD
+					    		break;
+					    	case 0: case 360:
+					    		currentDiceValue = 5; //MOD (OK)
+					    		break;
+			    		}
+			    		break;
+			    	case 270:
+			    		switch(zRot) {
+				    		case 90:
+				    			currentDiceValue = 3; //MOD
+					    		break;
+					    	case 180:
+					    		currentDiceValue = 2; //MOD
+					    		break;
+					    	case 270:
+					    		currentDiceValue = 4; //MOD
+					    		break;
+					    	case 0: case 360:
+					    		currentDiceValue = 5; //MOD
+					    		break;
+			    		}
+			    		break;
+			    	case 0: case 360:
+			    		switch(zRot) {
+				    		case 90:
+				    			currentDiceValue = 3; //MOD
+					    		break;
+					    	case 180:
+					    		currentDiceValue = 2; //MOD
+					    		break;
+					    	case 270:
+					    		currentDiceValue = 4; //MOD
+					    		break;
+					    	case 0: case 360:
+					    		currentDiceValue = 5; //MOD
+					    		break;
+			    		}
+			    		break;
+	    		}
+	    		break;
+	    	case 0+15: case 360+15:
+	    		switch(yRot) {
+		    		case 90:
+			    		switch(zRot) {
+				    		case 90:
+				    			currentDiceValue = 2; //MOD
+					    		break;
+					    	case 180:
+					    		currentDiceValue = 4; //MOD
+					    		break;
+					    	case 270:
+					    		currentDiceValue = 5; //MOD (OK)
+					    		break;
+					    	case 0: case 360:
+					    		currentDiceValue = 3; //MOD
+					    		break;
+			    		}
+			    		break;
+			    	case 180:
+			    		switch(zRot) {
+				    		case 90:
+				    			currentDiceValue = 6; //MOD
+					    		break;
+					    	case 180:
+					    		currentDiceValue = 6; //MOD
+					    		break;
+					    	case 270:
+					    		currentDiceValue = 6; //MOD
+					    		break;
+					    	case 0: case 360:
+					    		currentDiceValue = 6; //MOD (OK)
+					    		break;
+			    		}
+			    		break;
+			    	case 270:
+			    		switch(zRot) {
+				    		case 90:
+				    			currentDiceValue = 5; //MOD
+					    		break;
+					    	case 180:
+					    		currentDiceValue = 3; //MOD
+					    		break;
+					    	case 270:
+					    		currentDiceValue = 2; //MOD
+					    		break;
+					    	case 0: case 360:
+					    		currentDiceValue = 4; //MOD
+					    		break;
+			    		}
+			    		break;
+			    	case 0: case 360:
+			    		switch(zRot) {
+				    		case 90:
+				    			currentDiceValue = 1; //MOD
+					    		break;
+					    	case 180:
+					    		currentDiceValue = 1; //MOD (OK)
+					    		break;
+					    	case 270:
+					    		currentDiceValue = 1; //MOD
+					    		break;
+					    	case 0: case 360:
+					    		currentDiceValue = 1; //MOD
+					    		break;
+			    		}
+		    			break;
+	    		}
+	    		break;
+   		}
+	}
+	
+    var rollingTime = 0;
+    var middleRollingTime = 0;
+    var lastTime = 0;
+	//Anima il dado
+    function animate() {
+        var timeNow = new Date().getTime();
+        if (rollingTime != 0 && lastTime != 0) {
+            var elapsed = timeNow - lastTime;
+
+            xRot += (xSpeed * elapsed) / 1000.0;
+            yRot += (ySpeed * elapsed) / 1000.0;
+            zRot += (zSpeed * elapsed) / 1000.0;
+            
+            xRot = xRot % 360;
+            yRot = yRot % 360;            
+            zRot = zRot % 360;
+                      
+            rollingTime = Math.max(rollingTime-elapsed,0);
+        }
+        if(rollingTime != 0) {
+        	lastTime = timeNow;
+        	if(rollingTime<middleRollingTime) {
+        		xSpeed += 10;
+            	ySpeed += 10;
+            	zSpeed += 10;       		
+        	} else {
+        		//xSpeed -= 20;
+            	//ySpeed -= 20;
+            	//zSpeed -= 20;         		
+        	}
+        } else {
+        	xSpeed = 0;
+        	ySpeed = 0;
+        	zSpeed = 0;
+        	
+        	lastTime = 0;
+        	
+        	xRot = 15+90*Math.floor(xRot/90);
+        	yRot = 90*Math.floor(yRot/90);
+        	zRot = 90*Math.floor(zRot/90);
+        	
+            xRot = xRot % 360;
+            yRot = yRot % 360;            
+            zRot = zRot % 360;
+            
+			getCurrentDiceValue(xRot,yRot,zRot);
+        }       
+    }
+
+	//viene richiamato ad intervalli regolari per animare la scena
+    function tick() {
+        requestAnimFrame(tick);
+        drawScene();
+        animate();
+    }
+
+	var fullscreen = false;
+
+	//Inizializza l'applicazione
+    function webGLStart() {
+        var canvas = document.getElementById("dice-canvas");
+
+        window.addEventListener("resize", function(){
+        	if(!fullscreen) {
+	            var w = getWindowWidth();
+	            var h = getWindowHeight();
+	            
+	            canvas.setAttribute("style","");
+	
+	            canvas.style.border = "none";
+	            canvas.style.width = w + "px";
+	            canvas.style.height = h + "px"; 
+	            
+	            canvas.width = w;
+	            canvas.height = h;
+	            
+	            gl.viewportWidth = w;
+	            gl.viewportHeight = h;
+	            
+	            fullscreen = true;
+        	} else {
+	            w = 640;
+	            h = 480;
+	            canvas.setAttribute("style","border: none; position: absolute; left: 50%; margin-left: -320px; top: 50%; margin-top: -240px;");
+
+	            canvas.style.width = w + "px";
+	            canvas.style.height = h + "px"; 
+	            
+	            canvas.width = w;
+	            canvas.height = h;
+	            
+	            gl.viewportWidth = w;
+	            gl.viewportHeight = h;   
+	            
+	            fullscreen = false;
+        	}
+        });
+
+        //For fullscreen
+        if(!document.mozFullScreenEnabled) {
+            alert("NO FULLSCREEN");
+        }
+        window.addEventListener("dblclick", function(){
+        	tdl.fullscreen.requestFullScreen(canvas);
+        });
+        
+        initGL(canvas);
+        initShaders();
+        initBuffers();
+        initTexture();        
+        
+        gl.clearColor(0.0, 0.0, 0.0, 1.0);
+        gl.enable(gl.DEPTH_TEST);
+        
+        document.onkeydown = function(e) {
+        	rollingTime=Math.floor((Math.random()*2000)+1000); //Tempo di rotazione da 1 a 3 secondi
+        	middleRollingTime=rollingTime/2;
+        	xSpeed=Math.floor((Math.random()*360*3)+360); //velocità di rotazione da 1 a 4 giri al secondo
+        	ySpeed=Math.floor((Math.random()*360*3)+360); 
+        	zSpeed=Math.floor((Math.random()*360*3)+360); 
+        }
+
+        tick();
+    }
+
+</script>
+
+
+</head>
+
+
+<body onload="webGLStart();">
+    <canvas id="dice-canvas" style="border: none; position: absolute; left: 50%; margin-left: -320px; top: 50%; margin-top: -240px;" width="640" height="480"></canvas>
+	
+	<p style="text-align: center"><input type="button" onClick="alert('Valore dado: '+currentDiceValue+'\r\nRotazione asse X: '+xRot+'\r\nRotazione asse Y: '+yRot+'\r\nRotazione asse Z: '+zRot)" value="Recupera valore"></p>
+	<p style="text-align: center">Doppio click sulla pagina per modalit&agrave; FULLSCREEN (se supportata). Premi qualsiasi tasto della tastiera per tirare il dado.</p>
+
+</body>
+
+</html>
