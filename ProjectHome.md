@@ -1,0 +1,3 @@
+Examples and simple scripts for the web. Mainly source code available on ufobm.altervista.org website. Programming languages: HTML, CSS, Javascript, PHP-MySQL, AJAX, ecc...
+
+All the code is free for non-commercial use. It can also be used for commercial purposes, but only after explicit (and written) accord. You are not allowed to delete informations about the authors and you must attribute the work in a explicit manner (for example, with a link). If you alter, transform, or build upon this work, please post back.
